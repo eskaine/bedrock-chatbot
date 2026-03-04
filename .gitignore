@@ -1,0 +1,12 @@
+.env.*
+*.txt
+*.pdf
+.DS_Store
+redesign.md
+deploy.config.sh
+
+dist
+docs
+raw
+modules
+node_modules

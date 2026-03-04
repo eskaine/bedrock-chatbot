@@ -1,0 +1,95 @@
+{
+  "name": "chatbot-main",
+  "description": "Guardrail for the internal IT/workplace chatbot. Blocks content outside IT and workplace scope, enforces PII protection, and filters harmful content.",
+  "blockedInputMessaging": "I'm sorry, I'm unable to answer that question. Please keep your questions focused on IT support or workplace topics related to your selected product.",
+  "blockedOutputsMessaging": "I'm sorry, I'm unable to answer that question. Please keep your questions focused on IT support or workplace topics related to your selected product.",
+  "contentPolicy": {
+    "filtersConfig": [
+      { "type": "SEXUAL",        "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "VIOLENCE",      "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "HATE",          "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "INSULTS",       "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "MISCONDUCT",    "inputStrength": "HIGH", "outputStrength": "HIGH" },
+      { "type": "PROMPT_ATTACK", "inputStrength": "HIGH", "outputStrength": "NONE" }
+    ]
+  },
+  "sensitiveInformationPolicy": {
+    "piiEntitiesConfig": [
+      { "type": "NAME",                     "action": "ANONYMIZE" },
+      { "type": "EMAIL",                    "action": "ANONYMIZE" },
+      { "type": "PHONE",                    "action": "ANONYMIZE" },
+      { "type": "ADDRESS",                  "action": "ANONYMIZE" },
+      { "type": "AGE",                      "action": "ANONYMIZE" },
+      { "type": "USERNAME",                 "action": "ANONYMIZE" },
+      { "type": "DRIVER_ID",                "action": "ANONYMIZE" },
+      { "type": "PASSWORD",                 "action": "BLOCK" },
+      { "type": "CREDIT_DEBIT_CARD_NUMBER", "action": "BLOCK" },
+      { "type": "US_BANK_ACCOUNT_NUMBER",    "action": "BLOCK" },
+      { "type": "US_SOCIAL_SECURITY_NUMBER","action": "BLOCK" }
+    ],
+    "regexesConfig": [
+      {
+        "name": "NRIC_FIN",
+        "description": "Singapore NRIC (S/T) and FIN (F/G/M) identity numbers",
+        "pattern": "[STFGM]\\d{7}[A-Z]",
+        "action": "ANONYMIZE"
+      }
+    ]
+  },
+  "topicPolicy": {
+    "topicsConfig": [
+      {
+        "name": "personal-financial-advice",
+        "definition": "Providing personalised financial, investment, or savings advice unrelated to workplace finance topics",
+        "examples": [
+          "Should I invest in stocks?",
+          "What should I do with my savings?",
+          "Is crypto a good investment?"
+        ],
+        "type": "DENY"
+      },
+      {
+        "name": "medical-advice",
+        "definition": "Providing personalised medical diagnosis or treatment recommendations",
+        "examples": [
+          "Do I have COVID?",
+          "What medicine should I take?",
+          "Should I see a doctor?"
+        ],
+        "type": "DENY"
+      },
+      {
+        "name": "legal-advice",
+        "definition": "Providing personalised legal advice or interpretation of laws",
+        "examples": [
+          "Can I sue my employer?",
+          "Is this contract valid?",
+          "What are my legal rights?"
+        ],
+        "type": "DENY"
+      },
+      {
+        "name": "non-workplace-topics",
+        "definition": "Questions unrelated to IT support, workplace tools, or company operations — such as personal entertainment, sports, relationships, or general knowledge unrelated to work",
+        "examples": [
+          "What movies should I watch?",
+          "Who won the football match?",
+          "Write me a poem",
+          "What is the meaning of life?"
+        ],
+        "type": "DENY"
+      }
+    ]
+  },
+  "groundingPolicy": {
+    "filtersConfig": [
+      { "type": "GROUNDING", "threshold": 0.7 },
+      { "type": "RELEVANCE", "threshold": 0.7 }
+    ]
+  },
+  "wordPolicy": {
+    "managedWordListsConfig": [
+      { "type": "PROFANITY" }
+    ]
+  }
+}
