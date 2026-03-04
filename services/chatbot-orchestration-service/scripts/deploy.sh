@@ -130,7 +130,8 @@ aws iam put-role-policy \
             \"Effect\": \"Allow\",
             \"Action\": [
                 \"dynamodb:GetItem\",
-                \"dynamodb:PutItem\"
+                \"dynamodb:PutItem\",
+                \"dynamodb:UpdateItem\"
             ],
             \"Resource\": \"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${TABLE_NAME}\"
         }]

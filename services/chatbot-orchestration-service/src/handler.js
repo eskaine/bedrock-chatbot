@@ -3,6 +3,7 @@ const { REGION, MODEL_ID, POSTGRES_HOST, POSTGRES_DB } = require('./lib/config')
 const { getLogger } = require('./lib/logger')
 const { systemPromptPromise } = require('./lib/llm')
 const { runChatPipeline } = require('./lib/pipeline')
+const { getOrCreateSession } = require('./lib/session')
 
 const logger = getLogger('handler')
 
@@ -12,6 +13,15 @@ logger.debug('DB config', { host: POSTGRES_HOST, db: POSTGRES_DB })
 logger.info('Lambda initialization complete')
 
 exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
+  // --- Session action (synchronous invoke from Fargate) -------------------
+
+  if (event.action === 'get_or_create_session') {
+    const result = await getOrCreateSession(event.sessionId || null)
+    responseStream.write(JSON.stringify(result))
+    responseStream.end()
+    return
+  }
+
   logger.debug('Received event', { event: JSON.stringify(event).slice(0, 500) })
 
   // --- Parse body ---------------------------------------------------------

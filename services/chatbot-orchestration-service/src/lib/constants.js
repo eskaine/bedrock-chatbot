@@ -31,7 +31,7 @@ const CATEGORY_RE = /^[a-zA-Z0-9_-]{1,64}$/
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 // Session
-const SESSION_TTL_SECONDS  = 86400  // 24 hours
+const SESSION_TTL_SECONDS  = 900    // 15 minutes
 const MAX_HISTORY_MESSAGES = 20     // 10 exchanges (user + assistant pairs)
 
 const RATE_LIMIT_MAX_REQUESTS   = 10

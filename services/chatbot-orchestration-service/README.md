@@ -99,15 +99,63 @@ The top 5 sections by fused score are selected and their full content fetched fr
 
 ---
 
+## Session Management
+
+Sessions are server-issued and stored in DynamoDB. The Lambda is the single owner of all session reads and writes — the Fargate gateway has no DynamoDB access.
+
+### Invocation modes
+
+The Lambda handler branches on `event.action`:
+
+| `event.action` | Invocation type | Used by |
+|---|---|---|
+| `get_or_create_session` | Synchronous (`RequestResponse`) | Fargate `GET /session` |
+| _(absent)_ | Streaming (`InvokeWithResponseStream`) | Fargate `POST /chat` |
+
+### Session lifecycle
+
+```
+Client loads page
+    ↓
+Fargate GET /session  (X-Session-Id header — optional)
+    ↓
+Lambda: get_or_create_session(sessionId)
+    ├── No / invalid ID  →  create new session  →  { status: "new",     sessionId, history: [] }
+    ├── ID found in DB   →  return history       →  { status: "active",  sessionId, history }
+    └── ID not in DB     →  session expired      →  { status: "expired" }
+```
+
+On `"expired"`, the frontend disables the input and shows an expiry message in the chat. The session ID remains in `sessionStorage` until the tab is closed or the user explicitly clears it.
+
+On every successful chat turn, `saveHistory` resets the TTL to `now + SESSION_TTL_SECONDS`, giving a **sliding 15-minute expiry window**. An idle session expires 15 minutes after the last message.
+
+### DynamoDB schema
+
+| Attribute | Type | Notes |
+|---|---|---|
+| `sessionId` | String (HASH) | Server-generated UUID v4 |
+| `messages` | List | Bedrock-format conversation history |
+| `ttl` | Number | Unix timestamp — DynamoDB TTL attribute (sliding) |
+| `createdAt` | String | ISO 8601 — set once on first write |
+| `updatedAt` | String | ISO 8601 — updated on every write |
+| `messageCount` | Number | Count of stored messages |
+
+---
+
 ## File Structure
 
 ```
 src/
-├── handler.js          — Lambda entry point, streaming response
+├── handler.js          — Lambda entry point; branches on event.action for session vs chat
 └── lib/
-    ├── constants.js    — Shared constants (limits, model IDs, prompts)
-    ├── retrieval.js    — Orchestrates retrieval pipeline (embed → RRF → fetch)
-    └── retrievers.js   — Three retriever functions + applyRRF
+    ├── config.js       — Environment variable bindings
+    ├── constants.js    — Shared constants (limits, TTL, model IDs, regex)
+    ├── llm.js          — Bedrock ConverseStream wrapper + system prompt loader
+    ├── logger.js       — Structured logger
+    ├── pipeline.js     — Full RAG pipeline: load history → retrieve → stream → save
+    ├── retrieval.js    — Orchestrates embed → parallel retrievers → RRF → fetch sections
+    ├── retrievers.js   — Three retriever functions + applyRRF
+    └── session.js      — DynamoDB session store: createSession, getOrCreateSession, saveHistory
 ```
 
 ---
@@ -137,3 +185,4 @@ The deploy script:
 | `DB_SECRET_ARN` | Secrets Manager ARN for DB credentials |
 | `GUARDRAIL_ID` | Bedrock Guardrail ID |
 | `GUARDRAIL_VERSION` | Bedrock Guardrail version |
+| `SESSIONS_TABLE` | DynamoDB table name for session storage |

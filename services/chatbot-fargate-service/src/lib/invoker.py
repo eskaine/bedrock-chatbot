@@ -22,6 +22,28 @@ logger = logging.getLogger(__name__)
 _lambda_client = boto3.client("lambda", region_name=config.region)
 
 
+def invoke_session(session_id: str | None) -> dict:
+    """
+    Invoke the orchestration Lambda synchronously to create or fetch a session.
+    """
+    payload = json.dumps({
+        "action": "get_or_create_session",
+        "sessionId": session_id or "",
+    })
+    try:
+        response = _lambda_client.invoke(
+            FunctionName=config.streaming_lambda_arn,
+            InvocationType="RequestResponse",
+            Payload=payload,
+        )
+    except Exception as e:
+        raise ExternalServiceError(
+            "Failed to invoke session Lambda",
+            context={"arn": config.streaming_lambda_arn},
+        ) from e
+    return json.loads(response["Payload"].read())
+
+
 def invoke_streaming(
     message: str,
     category: str | None,

@@ -6,7 +6,6 @@ import { ALLOWED_CHARS_REGEX, MAX_MESSAGE_LENGTH } from "@typings/constants"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@components/ui/dialog"
 import { Input } from "@components/ui/input"
 import { Button } from "@components/ui/button"
-import { ScrollArea } from "@components/ui/scroll-area"
 import { Avatar, AvatarFallback, AvatarImage } from '@components/ui/avatar'
 import { MessageLoading } from "./MessageLoading"
 import type { Message } from "@typings/interfaces"
@@ -20,17 +19,20 @@ interface ChatDialogProps {
     messages: Message[]
     onSendMessage: (content: string) => void
     isLoading?: boolean
+    isExpired?: boolean
     selectedTopic: string | null
     onTopicChange: (topic: string | null) => void
 }
 
-export function ChatDialog({ messages, onSendMessage, isLoading, selectedTopic, onTopicChange }: ChatDialogProps) {
+export function ChatDialog({ messages, onSendMessage, isLoading, isExpired, selectedTopic, onTopicChange }: ChatDialogProps) {
     const [inputValue, setInputValue] = useState("")
-    const bottomRef = useRef<HTMLDivElement>(null)
+    const scrollRef = useRef<HTMLDivElement>(null)
     const hasUserMessage = messages.some((m) => m.role === 'user')
 
     useEffect(() => {
-        bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+        if (scrollRef.current) {
+            scrollRef.current.scrollTop = scrollRef.current.scrollHeight
+        }
     }, [messages])
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -69,7 +71,7 @@ export function ChatDialog({ messages, onSendMessage, isLoading, selectedTopic, 
                     <DialogTitle>Chat</DialogTitle>
                     <DialogDescription className="sr-only">Chat assistant</DialogDescription>
                 </DialogHeader>
-                <ScrollArea className="flex-1 px-6 py-0 overflow-y-auto">
+                <div ref={scrollRef} className="flex-1 px-6 overflow-y-auto">
                     <div className="space-y-4 py-6">
                         {messages.map((message, index) => (
                             <div key={message.id}>
@@ -93,12 +95,14 @@ export function ChatDialog({ messages, onSendMessage, isLoading, selectedTopic, 
                                     </div>
                                 </div>
                                 {index === 0 && (
-                                    hasUserMessage && selectedTopic ? (
-                                        <div className="flex justify-start mt-2">
-                                            <div className="rounded-lg px-4 py-2 max-w-[80%] bg-muted">
-                                                You have selected <span className="font-semibold">{TOPICS.find(t => t.value === selectedTopic)?.label}</span>.
+                                    hasUserMessage ? (
+                                        selectedTopic && (
+                                            <div className="flex justify-start mt-2">
+                                                <div className="rounded-lg px-4 py-2 max-w-[80%] bg-muted">
+                                                    You have selected <span className="font-semibold">{TOPICS.find(t => t.value === selectedTopic)?.label}</span>.
+                                                </div>
                                             </div>
-                                        </div>
+                                        )
                                     ) : (
                                         <div className="mt-8 border-2 overflow-hidden w-48 mx-auto rounded-sm">
                                             {TOPICS.map((topic, i) => (
@@ -122,9 +126,8 @@ export function ChatDialog({ messages, onSendMessage, isLoading, selectedTopic, 
                         {isLoading && (
                             <MessageLoading />
                         )}
-                        <div ref={bottomRef} />
                     </div>
-                </ScrollArea>
+                </div>
 
                 <div className="p-4 border-t flex gap-2">
                     <Input
@@ -132,10 +135,10 @@ export function ChatDialog({ messages, onSendMessage, isLoading, selectedTopic, 
                         value={inputValue}
                         onChange={handleChange}
                         onKeyDown={handleKeyDown}
-                        disabled={isLoading || !selectedTopic}
+                        disabled={isLoading || isExpired || !selectedTopic}
                         maxLength={MAX_MESSAGE_LENGTH}
                     />
-                    <Button variant="default" onClick={handleSend} disabled={isLoading || !inputValue.trim() || !selectedTopic}>
+                    <Button variant="default" onClick={handleSend} disabled={isLoading || isExpired || !inputValue.trim() || !selectedTopic}>
                         Send
                     </Button>
                 </div>

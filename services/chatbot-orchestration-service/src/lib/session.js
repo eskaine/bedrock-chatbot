@@ -3,7 +3,7 @@
  *
  * DynamoDB table: chatbot-sessions-{env}   (PAY_PER_REQUEST billing)
  * ┌─────────────────────────────────────────────────────────────────────────┐
- * │ sessionId    String   HASH key — client-generated UUID v4               │
+ * │ sessionId    String   HASH key — server-generated UUID v4                │
  * │ messages     List     Bedrock-format conversation history                │
  * │ ttl          Number   Unix timestamp — DynamoDB TTL (sliding, 24 h)      │
  * │ createdAt    String   ISO 8601 — set once on first write                 │
@@ -12,14 +12,15 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * TTL behaviour: every save resets ttl to now + SESSION_TTL_SECONDS, giving
- * a sliding expiry window. An idle session expires 24 h after the last message.
+ * a sliding expiry window. An idle session expires 15 min after the last message.
  *
  * Concurrency: sessions are single-user and single-threaded per Lambda
  * invocation, so last-write-wins on UpdateItem is acceptable.
  */
 
+const { randomUUID } = require('crypto')
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb')
-const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb')
+const { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb')
 const { REGION, SESSIONS_TABLE } = require('./config')
 const { SESSION_TTL_SECONDS, SESSION_ID_RE } = require('./constants')
 const { getLogger } = require('./logger')
@@ -72,9 +73,57 @@ async function saveHistory(sessionId, messages) {
         ':count':    messages.length,
       },
     }))
+    logger.info('History saved', { sessionId, messageCount: messages.length })
   } catch (err) {
     logger.error('Failed to save history', { error: err.message })
   }
 }
 
-module.exports = { loadHistory, saveHistory }
+async function createSession() {
+  const sessionId = randomUUID()
+  if (!SESSIONS_TABLE) return sessionId
+  try {
+    const now = new Date().toISOString()
+    const ttl = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS
+    await dynamo.send(new PutCommand({
+      TableName: SESSIONS_TABLE,
+      Item: { sessionId, messages: [], ttl, createdAt: now, updatedAt: now, messageCount: 0 },
+    }))
+  } catch (err) {
+    logger.error('Failed to create session', { error: err.message })
+  }
+  return sessionId
+}
+
+async function getOrCreateSession(sessionId) {
+  if (!sessionId || !isValidSessionId(sessionId)) {
+    logger.info('No valid sessionId provided — creating new session')
+    const newId = await createSession()
+    return { status: 'new', sessionId: newId, history: [] }
+  }
+  if (!SESSIONS_TABLE) {
+    logger.warn('SESSIONS_TABLE not set — session persistence disabled')
+    return { status: 'new', sessionId: await createSession(), history: [] }
+  }
+  try {
+    const result = await dynamo.send(new GetCommand({
+      TableName: SESSIONS_TABLE,
+      Key: { sessionId },
+    }))
+    if (!result.Item) {
+      logger.info('Session not found in DynamoDB', { sessionId })
+      return { status: 'expired' }
+    }
+    const history = (result.Item.messages ?? []).map(m => ({
+      role: m.role,
+      content: m.content?.[0]?.text ?? '',
+    }))
+    logger.info('Session found', { sessionId, historyLength: history.length })
+    return { status: 'active', sessionId, history }
+  } catch (err) {
+    logger.error('Failed to get session', { error: err.message })
+    return { status: 'expired' }
+  }
+}
+
+module.exports = { loadHistory, saveHistory, getOrCreateSession }

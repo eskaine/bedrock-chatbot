@@ -29,7 +29,8 @@
       "@components/*": ["./src/components/*"],
       "@schemas/*": ["./src/schemas/*"],
       "@typings/*": ["./src/types/*"],
-      "@config/*": ["./src/config/*"]
+      "@config/*": ["./src/config/*"],
+      "@hooks/*": ["./src/hooks/*"]
     }
   },
   "include": ["src"]

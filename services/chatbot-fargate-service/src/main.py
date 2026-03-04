@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 
 from lib.config import config
 from lib.pipeline import stream_chat_response
-from lib.session import load_history
+from lib.invoker import invoke_session
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s %(message)s')
 logger = logging.getLogger(__name__)
@@ -31,12 +31,10 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-@app.get("/history")
-async def history(request: Request) -> dict:
+@app.get("/session")
+async def session(request: Request) -> dict:
     session_id: str | None = request.headers.get("x-session-id")
-    if not session_id:
-        return {"messages": []}
-    return {"messages": load_history(session_id)}
+    return invoke_session(session_id)
 
 
 @app.post("/chat")
