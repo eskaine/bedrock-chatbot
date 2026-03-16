@@ -126,6 +126,19 @@ if [ -z "${EXEC_ROLE_ARN}" ] || [ "${EXEC_ROLE_ARN}" = "None" ]; then
     --role-name "${TASK_EXEC_ROLE_NAME}" \
     --policy-arn "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 fi
+
+# Always update secrets policy so JWT_SECRET_ARN changes take effect on redeploy
+aws iam put-role-policy \
+  --role-name "${TASK_EXEC_ROLE_NAME}" \
+  --policy-name "SecretsManagerRead" \
+  --policy-document "{
+    \"Version\": \"2012-10-17\",
+    \"Statement\": [{
+      \"Effect\": \"Allow\",
+      \"Action\": \"secretsmanager:GetSecretValue\",
+      \"Resource\": \"${JWT_SECRET_ARN}*\"
+    }]
+  }"
 echo "  Execution role ARN: ${EXEC_ROLE_ARN}"
 
 # ─────────────────────────────────────────────
@@ -161,6 +174,35 @@ aws iam put-role-policy \
       \"Resource\": \"${STREAMING_LAMBDA_ARN}\"
     }]
   }"
+
+# Polly (SynthesizeSpeech) and Transcribe Streaming — resource-level permissions not supported
+aws iam put-role-policy \
+  --role-name "${TASK_ROLE_NAME}" \
+  --policy-name "VoiceServices" \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": [
+        "polly:SynthesizeSpeech",
+        "transcribe:StartStreamTranscription"
+      ],
+      "Resource": "*"
+    }]
+  }'
+
+# DynamoDB — UpdateItem on the sessions table for cross-task rate limiting
+aws iam put-role-policy \
+  --role-name "${TASK_ROLE_NAME}" \
+  --policy-name "DynamoDBRateLimit" \
+  --policy-document "{
+    \"Version\": \"2012-10-17\",
+    \"Statement\": [{
+      \"Effect\": \"Allow\",
+      \"Action\": \"dynamodb:UpdateItem\",
+      \"Resource\": \"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${SESSIONS_TABLE}\"
+    }]
+  }"
 echo "  Task role ARN: ${TASK_ROLE_ARN}"
 
 # ─────────────────────────────────────────────
@@ -172,6 +214,7 @@ if [ -z "${VPC_ID}" ]; then
   exit 1
 fi
 echo "  VPC ID: ${VPC_ID}"
+
 
 # ─────────────────────────────────────────────
 # Step 11: Validate subnets
@@ -214,6 +257,7 @@ if [ -z "${ALB_SG_ID}" ] || [ "${ALB_SG_ID}" = "None" ]; then
     --cidr 0.0.0.0/0 \
     --region "${REGION}"
 fi
+
 echo "  ALB SG ID: ${ALB_SG_ID}"
 
 # ─────────────────────────────────────────────
@@ -296,6 +340,60 @@ fi
 echo "  Lambda VPC endpoint ID: ${LAMBDA_ENDPOINT_ID}"
 
 # ─────────────────────────────────────────────
+# Step 14a: Create Polly VPC endpoint (idempotent)
+# ─────────────────────────────────────────────
+echo "[14a] Creating Polly VPC endpoint..."
+POLLY_ENDPOINT_ID="$(aws ec2 describe-vpc-endpoints \
+  --filters \
+    "Name=service-name,Values=com.amazonaws.${REGION}.polly" \
+    "Name=vpc-id,Values=${VPC_ID}" \
+    "Name=vpc-endpoint-state,Values=available,pending" \
+  --query 'VpcEndpoints[0].VpcEndpointId' \
+  --output text \
+  --region "${REGION}" 2>/dev/null || true)"
+
+if [ -z "${POLLY_ENDPOINT_ID}" ] || [ "${POLLY_ENDPOINT_ID}" = "None" ]; then
+  POLLY_ENDPOINT_ID="$(aws ec2 create-vpc-endpoint \
+    --vpc-id "${VPC_ID}" \
+    --service-name "com.amazonaws.${REGION}.polly" \
+    --vpc-endpoint-type Interface \
+    --subnet-ids "${ECS_SUBNET_1}" "${ECS_SUBNET_2}" \
+    --security-group-ids "${LAMBDA_ENDPOINT_SG_ID}" \
+    --private-dns-enabled \
+    --region "${REGION}" \
+    --query 'VpcEndpoint.VpcEndpointId' \
+    --output text 2>/dev/null)" || echo "  [WARN] Could not create Polly VPC endpoint — traffic will route via NAT gateway"
+fi
+echo "  Polly VPC endpoint ID: ${POLLY_ENDPOINT_ID:-none (using NAT)}"
+
+# ─────────────────────────────────────────────
+# Step 14b: Create Transcribe Streaming VPC endpoint (idempotent)
+# ─────────────────────────────────────────────
+echo "[14b] Creating Transcribe Streaming VPC endpoint..."
+TRANSCRIBE_ENDPOINT_ID="$(aws ec2 describe-vpc-endpoints \
+  --filters \
+    "Name=service-name,Values=com.amazonaws.${REGION}.transcribestreaming" \
+    "Name=vpc-id,Values=${VPC_ID}" \
+    "Name=vpc-endpoint-state,Values=available,pending" \
+  --query 'VpcEndpoints[0].VpcEndpointId' \
+  --output text \
+  --region "${REGION}" 2>/dev/null || true)"
+
+if [ -z "${TRANSCRIBE_ENDPOINT_ID}" ] || [ "${TRANSCRIBE_ENDPOINT_ID}" = "None" ]; then
+  TRANSCRIBE_ENDPOINT_ID="$(aws ec2 create-vpc-endpoint \
+    --vpc-id "${VPC_ID}" \
+    --service-name "com.amazonaws.${REGION}.transcribestreaming" \
+    --vpc-endpoint-type Interface \
+    --subnet-ids "${ECS_SUBNET_1}" "${ECS_SUBNET_2}" \
+    --security-group-ids "${LAMBDA_ENDPOINT_SG_ID}" \
+    --private-dns-enabled \
+    --region "${REGION}" \
+    --query 'VpcEndpoint.VpcEndpointId' \
+    --output text 2>/dev/null)" || echo "  [WARN] Could not create Transcribe VPC endpoint — traffic will route via NAT gateway"
+fi
+echo "  Transcribe Streaming VPC endpoint ID: ${TRANSCRIBE_ENDPOINT_ID:-none (using NAT)}"
+
+# ─────────────────────────────────────────────
 # Step 15: Create ALB (internet-facing)
 # ─────────────────────────────────────────────
 echo "[15] Creating ALB..."
@@ -325,6 +423,88 @@ ALB_DNS="$(aws elbv2 describe-load-balancers \
   --region "${REGION}")"
 echo "  ALB ARN: ${ALB_ARN}"
 echo "  ALB DNS: ${ALB_DNS}"
+
+# ─────────────────────────────────────────────
+# Step 15a: Create and associate WAF Web ACL
+# ─────────────────────────────────────────────
+echo "[15a] Setting up WAF Web ACL..."
+WAF_ACL_NAME="${SERVICE_NAME}-waf-acl"
+
+# SizeRestrictions_BODY blocks request bodies > 8 KB — overridden to Count so that
+# the voice-chat endpoint can receive large base64-encoded audio payloads.
+# The application enforces its own 5 MB limit, so this is safe.
+WAF_RULES='[
+  {
+    "Name": "AWSManagedRulesCommonRuleSet",
+    "Priority": 0,
+    "OverrideAction": { "None": {} },
+    "Statement": {
+      "ManagedRuleGroupStatement": {
+        "VendorName": "AWS",
+        "Name": "AWSManagedRulesCommonRuleSet",
+        "RuleActionOverrides": [
+          {
+            "Name": "SizeRestrictions_BODY",
+            "ActionToUse": { "Count": {} }
+          }
+        ]
+      }
+    },
+    "VisibilityConfig": {
+      "SampledRequestsEnabled": true,
+      "CloudWatchMetricsEnabled": true,
+      "MetricName": "AWSManagedRulesCommonRuleSet"
+    }
+  }
+]'
+
+WAF_ACL_INFO="$(aws wafv2 list-web-acls \
+  --scope REGIONAL \
+  --region "${REGION}" \
+  --query "WebACLs[?Name=='${WAF_ACL_NAME}'] | [0]" \
+  --output json 2>/dev/null || true)"
+
+WAF_ACL_ARN="$(echo "${WAF_ACL_INFO}" | jq -r '.ARN // empty')"
+WAF_ACL_ID="$(echo "${WAF_ACL_INFO}"  | jq -r '.Id  // empty')"
+
+if [ -z "${WAF_ACL_ARN}" ]; then
+  WAF_ACL_ARN="$(aws wafv2 create-web-acl \
+    --name "${WAF_ACL_NAME}" \
+    --scope REGIONAL \
+    --region "${REGION}" \
+    --default-action '{"Allow": {}}' \
+    --rules "${WAF_RULES}" \
+    --visibility-config '{"SampledRequestsEnabled":true,"CloudWatchMetricsEnabled":true,"MetricName":"'"${WAF_ACL_NAME}"'"}' \
+    --query 'Summary.ARN' \
+    --output text)"
+  echo "  WAF Web ACL created: ${WAF_ACL_ARN}"
+else
+  echo "  WAF Web ACL already exists — updating rules..."
+  WAF_LOCK_TOKEN="$(aws wafv2 get-web-acl \
+    --name "${WAF_ACL_NAME}" \
+    --scope REGIONAL \
+    --id "${WAF_ACL_ID}" \
+    --region "${REGION}" \
+    --query 'LockToken' \
+    --output text)"
+  aws wafv2 update-web-acl \
+    --name "${WAF_ACL_NAME}" \
+    --scope REGIONAL \
+    --id "${WAF_ACL_ID}" \
+    --region "${REGION}" \
+    --default-action '{"Allow": {}}' \
+    --rules "${WAF_RULES}" \
+    --visibility-config '{"SampledRequestsEnabled":true,"CloudWatchMetricsEnabled":true,"MetricName":"'"${WAF_ACL_NAME}"'"}' \
+    --lock-token "${WAF_LOCK_TOKEN}" \
+    --output text > /dev/null
+  echo "  WAF Web ACL updated: ${WAF_ACL_ARN}"
+fi
+
+aws wafv2 associate-web-acl \
+  --web-acl-arn "${WAF_ACL_ARN}" \
+  --resource-arn "${ALB_ARN}" \
+  --region "${REGION}" 2>/dev/null || true
+echo "  WAF associated with ALB"
 
 # ─────────────────────────────────────────────
 # Step 16: Create target group
@@ -384,7 +564,14 @@ echo "[18] Registering task definition..."
 CONTAINER_ENV="[
   {\"name\": \"AWS_REGION\",            \"value\": \"${REGION}\"},
   {\"name\": \"STREAMING_LAMBDA_ARN\",  \"value\": \"${STREAMING_LAMBDA_ARN}\"},
-  {\"name\": \"CORS_ALLOWED_ORIGINS\",  \"value\": \"${CORS_ALLOWED_ORIGINS}\"}
+  {\"name\": \"CORS_ALLOWED_ORIGINS\",  \"value\": \"${CORS_ALLOWED_ORIGINS}\"},
+  {\"name\": \"JWT_COOKIE_DOMAIN\",     \"value\": \"${JWT_COOKIE_DOMAIN}\"},
+  {\"name\": \"JWT_COOKIE_SECURE\",     \"value\": \"${JWT_COOKIE_SECURE}\"},
+  {\"name\": \"SESSIONS_TABLE\",        \"value\": \"${SESSIONS_TABLE}\"}
+]"
+
+CONTAINER_SECRETS="[
+  {\"name\": \"JWT_SECRET\", \"valueFrom\": \"${JWT_SECRET_ARN}\"}
 ]"
 
 TASK_DEF_ARN="$(aws ecs register-task-definition \
@@ -401,6 +588,7 @@ TASK_DEF_ARN="$(aws ecs register-task-definition \
       \"image\": \"${IMAGE_WITH_DIGEST}\",
       \"portMappings\": [{\"containerPort\": 8080, \"protocol\": \"tcp\"}],
       \"environment\": ${CONTAINER_ENV},
+      \"secrets\": ${CONTAINER_SECRETS},
       \"logConfiguration\": {
         \"logDriver\": \"awslogs\",
         \"options\": {
@@ -409,7 +597,8 @@ TASK_DEF_ARN="$(aws ecs register-task-definition \
           \"awslogs-stream-prefix\": \"ecs\"
         }
       },
-      \"essential\": true
+      \"essential\": true,
+      \"readonlyRootFilesystem\": true
     }
   ]" \
   --region "${REGION}" \
@@ -434,7 +623,7 @@ if [ -z "${SERVICE_EXISTS}" ] || [ "${SERVICE_EXISTS}" = "None" ]; then
     --cluster "${CLUSTER_NAME}" \
     --service-name "${ECS_SERVICE_NAME}" \
     --task-definition "${TASK_DEF_ARN}" \
-    --desired-count 1 \
+    --desired-count 2 \
     --launch-type FARGATE \
     --network-configuration "awsvpcConfiguration={subnets=[${ECS_SUBNET_1},${ECS_SUBNET_2}],securityGroups=[${ECS_SG_ID}],assignPublicIp=DISABLED}" \
     --load-balancers "targetGroupArn=${TG_ARN},containerName=${SERVICE_NAME},containerPort=8080" \

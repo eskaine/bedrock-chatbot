@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react"
 import Markdown from "react-markdown"
 import remarkGfm from "remark-gfm"
+import { Mic, Square, Send, VolumeX, ChevronDown } from "lucide-react"
 import { messageSchema } from "@schemas/message"
 import { ALLOWED_CHARS_REGEX, MAX_MESSAGE_LENGTH } from "@typings/constants"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@components/ui/dialog"
@@ -8,32 +9,48 @@ import { Input } from "@components/ui/input"
 import { Button } from "@components/ui/button"
 import { Avatar, AvatarFallback, AvatarImage } from '@components/ui/avatar'
 import { MessageLoading } from "./MessageLoading"
+import { Spinner } from "@components/ui/spinner"
+import { ChatRole } from "@typings/enums"
 import type { Message } from "@typings/interfaces"
-
-const TOPICS = [
-    { label: 'Aegis', value: 'aegis' },
-    { label: 'QualiFly', value: 'qualifly' },
-]
+import { useVoiceRecorder } from "@hooks/useVoiceRecorder"
 
 interface ChatDialogProps {
     messages: Message[]
     onSendMessage: (content: string) => void
+    onSendVoiceMessage: (pcm: ArrayBuffer, sampleRate: number) => void
     isLoading?: boolean
+    isVoiceProcessing?: boolean
+    isVoiceResponding?: boolean
+    isAudioPlaying?: boolean
+    onStopAudio?: () => void
     isExpired?: boolean
-    selectedTopic: string | null
-    onTopicChange: (topic: string | null) => void
+    isInitializing?: boolean
+    onNewSession: () => void
 }
 
-export function ChatDialog({ messages, onSendMessage, isLoading, isExpired, selectedTopic, onTopicChange }: ChatDialogProps) {
+export function ChatDialog({ messages, onSendMessage, onSendVoiceMessage, isLoading, isVoiceProcessing, isVoiceResponding, isAudioPlaying, onStopAudio, isExpired, isInitializing, onNewSession }: ChatDialogProps) {
     const [inputValue, setInputValue] = useState("")
+    const [showScrollButton, setShowScrollButton] = useState(false)
     const scrollRef = useRef<HTMLDivElement>(null)
-    const hasUserMessage = messages.some((m) => m.role === 'user')
+    const { isRecording, startRecording, stopAndSend } = useVoiceRecorder(onSendVoiceMessage)
+    const isBusy = isLoading || isVoiceProcessing || isVoiceResponding || isExpired
 
     useEffect(() => {
-        if (scrollRef.current) {
-            scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-        }
+        const el = scrollRef.current
+        if (el) el.scrollTop = el.scrollHeight
     }, [messages])
+
+    const handleScroll = () => {
+        const el = scrollRef.current
+        if (!el) return
+        setShowScrollButton(el.scrollHeight - el.scrollTop - el.clientHeight > 100)
+    }
+
+    const scrollToBottom = () => {
+        const el = scrollRef.current
+        if (!el) return
+        el.scrollTop = el.scrollHeight
+    }
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const value = e.target.value.replace(ALLOWED_CHARS_REGEX, '').slice(0, MAX_MESSAGE_LENGTH)
@@ -71,10 +88,21 @@ export function ChatDialog({ messages, onSendMessage, isLoading, isExpired, sele
                     <DialogTitle>Chat</DialogTitle>
                     <DialogDescription className="sr-only">Chat assistant</DialogDescription>
                 </DialogHeader>
-                <div ref={scrollRef} className="flex-1 px-6 overflow-y-auto">
-                    <div className="space-y-4 py-6">
-                        {messages.map((message, index) => (
+                <div className="relative flex-1 overflow-hidden">
+                <div ref={scrollRef} onScroll={handleScroll} className="h-full px-6 overflow-y-auto">
+                    {isInitializing && (
+                        <div className="flex items-center justify-center h-full">
+                            <Spinner className="size-6" />
+                        </div>
+                    )}
+                    <div className={`space-y-4 py-6 ${isInitializing ? 'hidden' : ''}`}>
+                        {messages.map((message) => (
                             <div key={message.id}>
+                                {message.role === ChatRole.System ? (
+                                    <div className="text-center text-muted-foreground text-xs py-2">
+                                        {message.content}
+                                    </div>
+                                ) : (
                                 <div className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                                     <div
                                         className={`rounded-lg px-4 py-2 max-w-[80%] ${message.role === 'user'
@@ -94,53 +122,66 @@ export function ChatDialog({ messages, onSendMessage, isLoading, isExpired, sele
                                         >{message.content}</Markdown>
                                     </div>
                                 </div>
-                                {index === 0 && (
-                                    hasUserMessage ? (
-                                        selectedTopic && (
-                                            <div className="flex justify-start mt-2">
-                                                <div className="rounded-lg px-4 py-2 max-w-[80%] bg-muted">
-                                                    You have selected <span className="font-semibold">{TOPICS.find(t => t.value === selectedTopic)?.label}</span>.
-                                                </div>
-                                            </div>
-                                        )
-                                    ) : (
-                                        <div className="mt-8 border-2 overflow-hidden w-48 mx-auto rounded-sm">
-                                            {TOPICS.map((topic, i) => (
-                                                <button
-                                                    key={topic.value}
-                                                    onClick={() => onTopicChange(selectedTopic === topic.value ? null : topic.value)}
-                                                    className={`w-full text-center px-4 py-1.5 text-sm transition-colors ${i > 0 ? 'border-t' : ''} ${
-                                                        selectedTopic === topic.value
-                                                            ? 'bg-primary text-primary-foreground'
-                                                            : 'bg-background text-foreground hover:bg-muted'
-                                                    }`}
-                                                >
-                                                    {topic.label}
-                                                </button>
-                                            ))}
-                                        </div>
-                                    )
                                 )}
-                            </div>
+                                </div>
                         ))}
-                        {isLoading && (
+                        {(isLoading || isVoiceResponding) && (
                             <MessageLoading />
+                        )}
+                        {isExpired && (
+                            <div className="text-center text-xs py-2">
+                                <button onClick={onNewSession} className="text-primary underline underline-offset-2 cursor-pointer">
+                                    Start a new session
+                                </button>
+                            </div>
                         )}
                     </div>
                 </div>
+                {showScrollButton && (
+                    <Button
+                        variant="secondary"
+                        size="icon"
+                        className="absolute bottom-3 right-6 rounded-full shadow-md"
+                        onClick={scrollToBottom}
+                    >
+                        <ChevronDown className="size-4" />
+                    </Button>
+                )}
+                </div>
 
                 <div className="p-4 border-t flex gap-2">
-                    <Input
-                        placeholder="Type a message..."
-                        value={inputValue}
-                        onChange={handleChange}
-                        onKeyDown={handleKeyDown}
-                        disabled={isLoading || isExpired || !selectedTopic}
-                        maxLength={MAX_MESSAGE_LENGTH}
-                    />
-                    <Button variant="default" onClick={handleSend} disabled={isLoading || isExpired || !inputValue.trim() || !selectedTopic}>
-                        Send
-                    </Button>
+                    {isRecording ? (
+                        <div className="flex flex-1 items-center gap-3 px-3 py-2 rounded-md border bg-muted">
+                            <span className="size-2 rounded-full bg-red-500 animate-pulse" />
+                            <span className="text-sm text-muted-foreground flex-1">Recording...</span>
+                        </div>
+                    ) : (
+                        <Input
+                            placeholder="Type a message..."
+                            value={inputValue}
+                            onChange={handleChange}
+                            onKeyDown={handleKeyDown}
+                            disabled={isBusy}
+                            maxLength={MAX_MESSAGE_LENGTH}
+                        />
+                    )}
+                    {isRecording ? (
+                        <Button variant="destructive" size="icon" onClick={stopAndSend}>
+                            <Square className="size-4 fill-current" />
+                        </Button>
+                    ) : isAudioPlaying ? (
+                        <Button variant="destructive" size="icon" onClick={onStopAudio}>
+                            <VolumeX className="size-4" />
+                        </Button>
+                    ) : inputValue.trim() ? (
+                        <Button variant="default" size="icon" onClick={handleSend} disabled={isBusy}>
+                            <Send className="size-4" />
+                        </Button>
+                    ) : (
+                        <Button variant="outline" size="icon" onClick={startRecording} disabled={isBusy || isVoiceProcessing}>
+                            {(isVoiceProcessing || isVoiceResponding) ? <Spinner className="size-4" /> : <Mic className="size-4" />}
+                        </Button>
+                    )}
                 </div>
             </DialogContent>
         </Dialog>

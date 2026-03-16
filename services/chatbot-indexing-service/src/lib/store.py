@@ -9,6 +9,28 @@ from .schema import Chunk, Section
 logger = logging.getLogger(__name__)
 
 
+def delete_document(conn: Any, source: str) -> int:
+    """Delete all sections (and their chunks via CASCADE) for a given S3 key.
+
+    Returns the number of sections deleted.
+    """
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                f"DELETE FROM {SECTIONS_TABLE} WHERE metadata->>'source' = %s",
+                (source,),
+            )
+            deleted = cursor.rowcount
+        if deleted:
+            logger.info("Deleted %d existing sections for source=%s", deleted, source)
+        return deleted
+    except Exception as e:
+        raise StorageError(
+            "Failed to delete existing document",
+            context={"source": source},
+        ) from e
+
+
 def store_section(conn: Any, section: Section) -> None:
     """Insert a parent section into document_sections. No-op if already exists."""
     try:

@@ -8,6 +8,9 @@ class Config:
     streaming_lambda_arn: str
     cors_allowed_origins: list[str]
     sessions_table: str | None
+    jwt_secret: str
+    jwt_cookie_domain: str | None
+    jwt_cookie_secure: bool
 
 
 def _require(name: str) -> str:
@@ -27,6 +30,9 @@ def load_config() -> Config:
             if origin.strip()
         ],
         sessions_table=os.environ.get("SESSIONS_TABLE"),
+        jwt_secret=_require("JWT_SECRET"),
+        jwt_cookie_domain=os.environ.get("JWT_COOKIE_DOMAIN"),
+        jwt_cookie_secure=os.environ.get("JWT_COOKIE_SECURE", "true").lower() == "true",
     )
 
 

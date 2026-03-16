@@ -46,7 +46,6 @@ def invoke_session(session_id: str | None) -> dict:
 
 def invoke_streaming(
     message: str,
-    category: str | None,
     session_id: str | None,
 ) -> Generator[str, None, None]:
     """
@@ -57,7 +56,7 @@ def invoke_streaming(
     """
     payload = json.dumps({
         "headers": {"x-session-id": session_id or ""},
-        "body": json.dumps({"message": message, "category": category}),
+        "body": json.dumps({"message": message}),
     })
 
     try:

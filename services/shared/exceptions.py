@@ -31,3 +31,4 @@ class ValidationError(ServiceError):
 
 class ConfigurationError(ServiceError):
     """Missing or invalid service configuration."""
+

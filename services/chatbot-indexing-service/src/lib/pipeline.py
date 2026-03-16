@@ -6,7 +6,7 @@ from .constants import EMBED_INPUT_TYPE
 from .embedder import embed_text
 from .extractor import extract_text
 from .schema import Chunk, Section, make_section_id
-from .store import store_chunk, store_section
+from .store import delete_document, store_chunk, store_section
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,8 @@ def index_document(key: str, body: Any, conn: Any, category: str) -> tuple[int, 
         ValidationError: if the file type is unsupported.
         ServiceError: if extraction, embedding, or storage fails.
     """
+    delete_document(conn, key)
+
     text = extract_text(key, body)
     logger.info("Extracted %d characters, %d words", len(text), len(text.split()))
 

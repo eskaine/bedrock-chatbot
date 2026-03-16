@@ -1,8 +1,8 @@
 ERROR_MESSAGE = "Invalid request. Please rephrase your question."
 
 # Input validation
-MAX_MESSAGE_LENGTH = 2000
-MIN_MESSAGE_LENGTH = 3
+MAX_MESSAGE_LENGTH = 1200
+MIN_MESSAGE_LENGTH = 1
 
 # Rate limiting
 RATE_LIMIT_MAX_REQUESTS = 10

@@ -1,5 +1,13 @@
 set -e
 
+# --- Prompt selection --------------------------------------------------------
+# Set PROMPT_TYPE to control which prompt is deployed.
+# Valid values:
+#   system      — chatbot system prompt        (prompt.txt -> PROMPT_ARN / PROMPT_VERSION)
+#   classifier  — query classifier prompt      (classifier-prompt.txt -> CLASSIFIER_PROMPT_ARN / CLASSIFIER_PROMPT_VERSION)
+
+PROMPT_TYPE="system"
+
 # --- Argument validation -----------------------------------------------------
 
 ENV="${1:?Usage: $0 <environment>  e.g. $0 dev}"
@@ -45,9 +53,24 @@ fi
 
 log_info "AWS Account: $(aws sts get-caller-identity --query Account --output text) | Environment: $ENV"
 
-# --- Load prompt text --------------------------------------------------------
+# --- Resolve prompt config from PROMPT_TYPE ----------------------------------
 
-PROMPT_FILE="$SCRIPT_DIR/../src/lib/prompt.txt"
+if [ "$PROMPT_TYPE" = "system" ]; then
+    PROMPT_FILE="$SCRIPT_DIR/../src/lib/prompts/prompt.txt"
+    RESOLVED_PROMPT_NAME="$PROMPT_NAME"
+    SECRET_ARN_KEY="PROMPT_ARN"
+    SECRET_VERSION_KEY="PROMPT_VERSION"
+elif [ "$PROMPT_TYPE" = "classifier" ]; then
+    PROMPT_FILE="$SCRIPT_DIR/../src/lib/prompts/classifier-prompt.txt"
+    RESOLVED_PROMPT_NAME="$CLASSIFIER_PROMPT_NAME"
+    SECRET_ARN_KEY="CLASSIFIER_PROMPT_ARN"
+    SECRET_VERSION_KEY="CLASSIFIER_PROMPT_VERSION"
+else
+    log_error "Unknown PROMPT_TYPE '$PROMPT_TYPE'. Valid values: system | classifier"
+    exit 1
+fi
+
+# --- Load prompt text --------------------------------------------------------
 
 if [ ! -f "$PROMPT_FILE" ]; then
     log_error "Prompt file not found: $PROMPT_FILE"
@@ -61,6 +84,7 @@ if [ -z "$PROMPT_TEXT" ]; then
     exit 1
 fi
 
+log_info "Prompt type: $PROMPT_TYPE"
 log_info "Prompt loaded: $(echo -n "$PROMPT_TEXT" | wc -c | tr -d ' ') characters"
 
 # --- Build variants JSON -----------------------------------------------------
@@ -80,24 +104,24 @@ VARIANTS=$(jq -cn --arg text "$PROMPT_TEXT" '[
 
 # --- Create or update prompt -------------------------------------------------
 
-log_info "Checking for existing prompt: $PROMPT_NAME..."
+log_info "Checking for existing prompt: $RESOLVED_PROMPT_NAME..."
 EXISTING_ID=$(aws bedrock-agent list-prompts \
     --region "$REGION" \
-    --query "promptSummaries[?name=='$PROMPT_NAME'].id | [0]" \
+    --query "promptSummaries[?name=='$RESOLVED_PROMPT_NAME'].id | [0]" \
     --output text 2>/dev/null || echo "")
 
 if [ -n "$EXISTING_ID" ] && [ "$EXISTING_ID" != "None" ]; then
     log_info "Updating existing prompt (ID: $EXISTING_ID)..."
     aws bedrock-agent update-prompt \
         --prompt-identifier "$EXISTING_ID" \
-        --name "$PROMPT_NAME" \
+        --name "$RESOLVED_PROMPT_NAME" \
         --variants "$VARIANTS" \
         --region "$REGION" > /dev/null
     PROMPT_ID="$EXISTING_ID"
 else
-    log_info "Creating new prompt: $PROMPT_NAME..."
+    log_info "Creating new prompt: $RESOLVED_PROMPT_NAME..."
     CREATE_RESPONSE=$(aws bedrock-agent create-prompt \
-        --name "$PROMPT_NAME" \
+        --name "$RESOLVED_PROMPT_NAME" \
         --variants "$VARIANTS" \
         --region "$REGION")
     PROMPT_ID=$(echo "$CREATE_RESPONSE" | jq -r '.id')
@@ -112,14 +136,14 @@ VERSION_RESPONSE=$(aws bedrock-agent create-prompt-version \
     --region "$REGION")
 
 VERSION_ARN=$(echo "$VERSION_RESPONSE" | jq -r '.arn')
-PROMPT_VERSION=$(echo "$VERSION_RESPONSE" | jq -r '.version')
+PUBLISHED_VERSION=$(echo "$VERSION_RESPONSE" | jq -r '.version')
 
 # Derive base prompt ARN by stripping the trailing :VERSION segment
 # Version ARN format: arn:aws:bedrock:REGION:ACCOUNT:prompt/ID:VERSION
-PROMPT_ARN="${VERSION_ARN%:*}"
+PUBLISHED_ARN="${VERSION_ARN%:*}"
 
-log_info "Prompt version $PROMPT_VERSION published"
-log_info "Prompt ARN: $PROMPT_ARN"
+log_info "Prompt version $PUBLISHED_VERSION published"
+log_info "Prompt ARN: $PUBLISHED_ARN"
 
 # --- Write back to Secrets Manager -------------------------------------------
 
@@ -133,25 +157,28 @@ CURRENT_SECRET=$(aws secretsmanager get-secret-value \
 }
 
 UPDATED_SECRET=$(echo "$CURRENT_SECRET" | jq \
-    --arg arn "$PROMPT_ARN" \
-    --arg v "$PROMPT_VERSION" \
-    '.PROMPT_ARN=$arn | .PROMPT_VERSION=$v')
+    --arg arn "$PUBLISHED_ARN" \
+    --arg v "$PUBLISHED_VERSION" \
+    --arg arn_key "$SECRET_ARN_KEY" \
+    --arg ver_key "$SECRET_VERSION_KEY" \
+    '.[$arn_key]=$arn | .[$ver_key]=$v')
 
 aws secretsmanager update-secret \
     --secret-id "$SECRET_ID" \
     --secret-string "$UPDATED_SECRET" \
     --region "$REGION" > /dev/null
 
-log_info "Secret updated with PROMPT_ARN and PROMPT_VERSION"
+log_info "Secret updated with $SECRET_ARN_KEY and $SECRET_VERSION_KEY"
 
 echo ""
 log_info "=================================================="
 log_info "Prompt update complete! [$ENV]"
 log_info "=================================================="
 echo ""
-echo -e "${GREEN}Prompt Name:${NC}    $PROMPT_NAME"
-echo -e "${GREEN}Prompt ARN:${NC}     $PROMPT_ARN"
-echo -e "${GREEN}Prompt Version:${NC} $PROMPT_VERSION"
+echo -e "${GREEN}Prompt Type:${NC}    $PROMPT_TYPE"
+echo -e "${GREEN}Prompt Name:${NC}    $RESOLVED_PROMPT_NAME"
+echo -e "${GREEN}Prompt ARN:${NC}     $PUBLISHED_ARN"
+echo -e "${GREEN}Prompt Version:${NC} $PUBLISHED_VERSION"
 echo ""
 log_info "Run ./deploy.sh $ENV to deploy the Lambda with the new prompt."
 echo ""

@@ -23,12 +23,35 @@ const dbCredsPromise = DB_SECRET_ARN
     })
   : Promise.resolve(null)
 
-async function getVectorContext(query, category) {
-  if (!POSTGRES_HOST) {
-    logger.info('POSTGRES_HOST not set, skipping retrieval')
-    return null
+// Fetched once at cold start — distinct category keys from the DB
+const categoriesPromise = dbCredsPromise.then(async dbCreds => {
+  if (!dbCreds) return []
+  const client = new Client({
+    host: POSTGRES_HOST,
+    database: POSTGRES_DB,
+    user: dbCreds.username,
+    password: dbCreds.password,
+    port: dbCreds.port || DB_PORT,
+    connectionTimeoutMillis: DB_CONNECT_TIMEOUT_MS,
+    ssl: { rejectUnauthorized: false },
+  })
+  try {
+    await client.connect()
+    const result = await client.query(
+      'SELECT DISTINCT category FROM document_sections ORDER BY category'
+    )
+    const categories = result.rows.map(r => r.category)
+    logger.info('Categories fetched from DB', { categories })
+    return categories
+  } catch (err) {
+    logger.error('Failed to fetch categories', { error: err.message })
+    return []
+  } finally {
+    await client.end().catch(() => {})
   }
+})
 
+async function getVectorContext(query, category) {
   const dbCreds = await dbCredsPromise
   if (!dbCreds) {
     logger.info('DB credentials not available, skipping retrieval')
@@ -50,7 +73,8 @@ async function getVectorContext(query, category) {
   try {
     await client.connect()
 
-    const vector = await embedQuery(query)
+    const embeddingQuery = category ? `${category}: ${query}` : query
+    const vector = await embedQuery(embeddingQuery)
 
     const [denseResults, sparseResults, headerResults] = await Promise.all([
       denseRetriever(client, vector, category),
@@ -89,4 +113,4 @@ async function fetchParentSections(client, sectionIds) {
   return result.rows
 }
 
-module.exports = { getVectorContext }
+module.exports = { categoriesPromise, getVectorContext }

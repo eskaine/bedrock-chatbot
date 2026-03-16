@@ -105,7 +105,6 @@ echo ""
 
 # Upload files
 UPLOADED=0
-SKIPPED=0
 FAILED=0
 
 while IFS= read -r file; do
@@ -114,14 +113,7 @@ while IFS= read -r file; do
     RELATIVE_PATH="${file#$LOCAL_DOCS_DIR/}"
     S3_KEY="$RELATIVE_PATH"
 
-    # Check if file already exists in S3
-    if aws s3 ls "s3://$S3_BUCKET/$S3_KEY" --region "$REGION" &> /dev/null; then
-        log_warn "Skipping (already exists): $S3_KEY"
-        ((SKIPPED++))
-        continue
-    fi
-
-    # Upload file preserving folder path
+    # Upload file preserving folder path (always overwrite to support re-indexing)
     log_info "Uploading: $S3_KEY"
 
     if aws s3 cp "$file" "s3://$S3_BUCKET/$S3_KEY" --region "$REGION" > /dev/null 2>&1; then
@@ -140,7 +132,6 @@ echo "========================================="
 echo "UPLOAD SUMMARY"
 echo "========================================="
 echo -e "${GREEN}Uploaded:${NC} $UPLOADED"
-echo -e "${YELLOW}Skipped:${NC}  $SKIPPED"
 if [ "$FAILED" -gt 0 ]; then
     echo -e "${RED}Failed:${NC}   $FAILED"
 fi

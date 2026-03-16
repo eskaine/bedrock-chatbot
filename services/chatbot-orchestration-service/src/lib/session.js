@@ -12,7 +12,7 @@
  * └─────────────────────────────────────────────────────────────────────────┘
  *
  * TTL behaviour: every save resets ttl to now + SESSION_TTL_SECONDS, giving
- * a sliding expiry window. An idle session expires 15 min after the last message.
+ * a sliding expiry window. An idle session expires 5 min after the last message.
  *
  * Concurrency: sessions are single-user and single-threaded per Lambda
  * invocation, so last-write-wins on UpdateItem is acceptable.
@@ -40,7 +40,10 @@ async function loadHistory(sessionId) {
       TableName: SESSIONS_TABLE,
       Key: { sessionId },
     }))
-    return result.Item?.messages ?? []
+    if (!result.Item) return null
+    const now = Math.floor(Date.now() / 1000)
+    if (result.Item.ttl && result.Item.ttl < now) return null
+    return result.Item.messages ?? []
   } catch (err) {
     logger.error('Failed to load history', { error: err.message })
     return []
@@ -112,6 +115,11 @@ async function getOrCreateSession(sessionId) {
     }))
     if (!result.Item) {
       logger.info('Session not found in DynamoDB', { sessionId })
+      return { status: 'expired' }
+    }
+    const now = Math.floor(Date.now() / 1000)
+    if (result.Item.ttl && result.Item.ttl < now) {
+      logger.info('Session TTL expired (item not yet deleted by DynamoDB)', { sessionId })
       return { status: 'expired' }
     }
     const history = (result.Item.messages ?? []).map(m => ({

@@ -1,7 +1,7 @@
-const { ERROR_MESSAGE, MAX_MESSAGE_LENGTH, MIN_MESSAGE_LENGTH, CATEGORY_RE } = require('./lib/constants')
+const { ERROR_MESSAGE, MAX_MESSAGE_LENGTH, MIN_MESSAGE_LENGTH } = require('./lib/constants')
 const { REGION, MODEL_ID, POSTGRES_HOST, POSTGRES_DB } = require('./lib/config')
 const { getLogger } = require('./lib/logger')
-const { systemPromptPromise } = require('./lib/llm')
+const { systemPromptPromise, classifierPromptPromise } = require('./lib/llm')
 const { runChatPipeline } = require('./lib/pipeline')
 const { getOrCreateSession } = require('./lib/session')
 
@@ -41,7 +41,6 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
   // be called directly, so we apply the same guards here as a second layer.
 
   const userMessage = typeof body.message === 'string' ? body.message.trim() : ''
-  const rawCategory = typeof body.category === 'string' ? body.category : null
   const sessionId   = event.headers?.['x-session-id'] || null
 
   if (!userMessage) {
@@ -62,24 +61,23 @@ exports.handler = awslambda.streamifyResponse(async (event, responseStream) => {
     return
   }
 
-  const category = rawCategory && CATEGORY_RE.test(rawCategory) ? rawCategory : null
-  if (rawCategory && !category) {
-    logger.warn('Invalid category in request — ignoring', { rawCategory })
-  }
-
-  logger.info('Request received', { message: userMessage.slice(0, 200), category, sessionId })
+  logger.info('Request received', { message: userMessage.slice(0, 200), sessionId })
 
   // --- Run pipeline -------------------------------------------------------
 
   try {
-    const systemPrompt = await systemPromptPromise
+    const [systemPrompt, classifierPrompt] = await Promise.all([systemPromptPromise, classifierPromptPromise])
 
-    for await (const text of runChatPipeline(userMessage, category, sessionId, systemPrompt)) {
+    for await (const text of runChatPipeline(userMessage, sessionId, systemPrompt, classifierPrompt)) {
       responseStream.write(JSON.stringify({ chunk: text }) + '\n')
     }
   } catch (err) {
-    logger.error('Unhandled error', { error: err.message, stack: err.stack })
-    responseStream.write(JSON.stringify({ error: ERROR_MESSAGE }) + '\n')
+    if (err.code === 'SESSION_EXPIRED') {
+      responseStream.write(JSON.stringify({ error: 'session_expired' }) + '\n')
+    } else {
+      logger.error('Unhandled error', { error: err.message, stack: err.stack })
+      responseStream.write(JSON.stringify({ error: ERROR_MESSAGE }) + '\n')
+    }
   }
 
   responseStream.end()

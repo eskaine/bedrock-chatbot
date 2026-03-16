@@ -8,7 +8,7 @@ ENV="${1:?Usage: $0 <environment>  e.g. $0 dev}"
 
 RUNTIME="nodejs20.x"
 HANDLER="handler.handler"
-TIMEOUT=60
+TIMEOUT=120
 MEMORY=512
 
 # --- Load per-environment configuration --------------------------------------
@@ -74,12 +74,14 @@ POSTGRES_DB=$(echo "$deploy_secret"       | jq -r '.POSTGRES_DB')
 DB_SECRET_ARN=$(echo "$deploy_secret"     | jq -r '.DB_SECRET_ARN')
 GUARDRAIL_ID=$(echo "$deploy_secret"      | jq -r '.GUARDRAIL_ID')
 GUARDRAIL_VERSION=$(echo "$deploy_secret" | jq -r '.GUARDRAIL_VERSION')
-PROMPT_ARN=$(echo "$deploy_secret"        | jq -r '.PROMPT_ARN')
-PROMPT_VERSION=$(echo "$deploy_secret"    | jq -r '.PROMPT_VERSION')
+PROMPT_ARN=$(echo "$deploy_secret"                  | jq -r '.PROMPT_ARN')
+PROMPT_VERSION=$(echo "$deploy_secret"              | jq -r '.PROMPT_VERSION')
+CLASSIFIER_PROMPT_ARN=$(echo "$deploy_secret"       | jq -r '.CLASSIFIER_PROMPT_ARN')
+CLASSIFIER_PROMPT_VERSION=$(echo "$deploy_secret"   | jq -r '.CLASSIFIER_PROMPT_VERSION')
 SUBNET_IDS=$(echo "$deploy_secret"        | jq -r '.SUBNET_IDS // empty')
 SECURITY_GROUP_ID=$(echo "$deploy_secret" | jq -r '.SECURITY_GROUP_ID // empty')
 
-for var in ROLE_NAME MODEL_ID POSTGRES_HOST POSTGRES_DB DB_SECRET_ARN GUARDRAIL_ID GUARDRAIL_VERSION PROMPT_ARN PROMPT_VERSION; do
+for var in ROLE_NAME MODEL_ID POSTGRES_HOST POSTGRES_DB DB_SECRET_ARN GUARDRAIL_ID GUARDRAIL_VERSION PROMPT_ARN PROMPT_VERSION CLASSIFIER_PROMPT_ARN CLASSIFIER_PROMPT_VERSION; do
     if [ -z "${!var}" ] || [ "${!var}" = "null" ]; then
         log_error "Missing key '$var' in secret $SECRET_ID"
         exit 1
@@ -212,8 +214,10 @@ ENV_JSON=$(jq -cn \
     --arg gver "$GUARDRAIL_VERSION" \
     --arg parn "$PROMPT_ARN" \
     --arg pver "$PROMPT_VERSION" \
+    --arg cparn "$CLASSIFIER_PROMPT_ARN" \
+    --arg cpver "$CLASSIFIER_PROMPT_VERSION" \
     --arg table "$TABLE_NAME" \
-    '{"Variables":{"MODEL_ID":$model,"POSTGRES_HOST":$host,"POSTGRES_DB":$db,"DB_SECRET_ARN":$arn,"GUARDRAIL_ID":$gid,"GUARDRAIL_VERSION":$gver,"PROMPT_ARN":$parn,"PROMPT_VERSION":$pver,"SESSIONS_TABLE":$table}}'
+    '{"Variables":{"MODEL_ID":$model,"POSTGRES_HOST":$host,"POSTGRES_DB":$db,"DB_SECRET_ARN":$arn,"GUARDRAIL_ID":$gid,"GUARDRAIL_VERSION":$gver,"PROMPT_ARN":$parn,"PROMPT_VERSION":$pver,"CLASSIFIER_PROMPT_ARN":$cparn,"CLASSIFIER_PROMPT_VERSION":$cpver,"SESSIONS_TABLE":$table}}'
 )
 
 # --- Deploy ------------------------------------------------------------------
@@ -277,49 +281,6 @@ else
         --region "$REGION"
 fi
 
-# --- Function URL (RESPONSE_STREAM required for streaming) -------------------
-
-log_info "Checking Function URL configuration..."
-if aws lambda get-function-url-config --function-name "$FUNCTION_NAME" --region "$REGION" &> /dev/null; then
-    log_warn "Function URL already exists"
-else
-    log_info "Creating Function URL..."
-
-    aws lambda create-function-url-config \
-        --function-name "$FUNCTION_NAME" \
-        --auth-type NONE \
-        --invoke-mode RESPONSE_STREAM \
-        --cors '{"AllowOrigins":["*"],"AllowMethods":["POST"],"AllowHeaders":["Content-Type","X-Session-Id"]}' \
-        --region "$REGION" \
-        > /dev/null
-
-    aws lambda add-permission \
-        --function-name "$FUNCTION_NAME" \
-        --statement-id FunctionURLAllowPublicAccess \
-        --action lambda:InvokeFunctionUrl \
-        --principal "*" \
-        --function-url-auth-type NONE \
-        --region "$REGION" \
-        > /dev/null 2>&1 || true
-
-    aws lambda add-permission \
-        --function-name "$FUNCTION_NAME" \
-        --statement-id FunctionURLInvokeAllowPublicAccess \
-        --action lambda:InvokeFunction \
-        --principal "*" \
-        --invoked-via-function-url \
-        --region "$REGION" \
-        > /dev/null 2>&1 || true
-
-    log_info "Function URL created and configured"
-fi
-
-FUNCTION_URL=$(aws lambda get-function-url-config \
-    --function-name "$FUNCTION_NAME" \
-    --region "$REGION" \
-    --query FunctionUrl \
-    --output text)
-
 # --- Cleanup -----------------------------------------------------------------
 
 rm -f function.zip
@@ -330,8 +291,4 @@ log_info "Deployment completed successfully! [$ENV]"
 log_info "=================================================="
 echo ""
 echo -e "${GREEN}Function Name:${NC} $FUNCTION_NAME"
-echo -e "${GREEN}Function URL:${NC}  $FUNCTION_URL"
-echo ""
-log_info "Add this to your frontend .env:"
-echo "VITE_LAMBDA_STREAMING_URL=$FUNCTION_URL"
 echo ""

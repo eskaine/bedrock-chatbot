@@ -1,25 +1,20 @@
 # chatbot-orchestration-service
 
-AWS Lambda that handles chat requests — retrieves relevant context from Aurora PostgreSQL using multi-retriever RRF, then streams a response from Claude via Bedrock.
+AWS Lambda that handles chat requests — classifies the topic and rewrites the user query, retrieves relevant context from Aurora PostgreSQL using multi-retriever RRF, then streams a response from Claude via Bedrock.
 
 ---
 
-## Retrieval Strategy
-
-### Overview
-
-Retrieval uses **Reciprocal Rank Fusion (RRF)** across three independent retrievers. Each retriever captures a different relevance signal. Their ranked results are fused into a single score, and the top-ranked parent sections are passed as context to Claude.
-
-This replaces single-signal hybrid search and removes the dependency on Cohere Rerank (not available in `ap-southeast-1`).
-
-### Pipeline
+## Pipeline
 
 ```
 User query
     ↓
-Embed query (Cohere embed-english-v3, search_query input type)
+Classify topic + rewrite query (Bedrock ConverseCommand, non-streaming)
+    ├── No topic matched  →  stream clarification message  →  save to history  →  return
     ↓
-Run 3 retrievers in parallel:
+Embed cleaned query (Cohere embed-english-v3)
+    ↓
+Run 3 retrievers in parallel (filtered by detected topic):
     ├── Dense   — ANN vector search on document_chunks.embedding (HNSW)
     ├── Sparse  — BM25 keyword search on document_chunks.content_tsvector (GIN)
     └── Header  — ANN vector search on document_sections.header_embedding (HNSW)
@@ -30,8 +25,39 @@ Select top 5 section IDs by RRF score
     ↓
 Fetch parent document_sections for those IDs
     ↓
-Pass full section text as context to Claude (ConverseStream)
+Stream response from Claude (ConverseStream) with retrieved context
+    ↓
+Save turn to DynamoDB session history
 ```
+
+---
+
+## Classification
+
+The classifier runs before retrieval on every invocation. It uses a dedicated Bedrock prompt (`CLASSIFIER_PROMPT_ARN`) to:
+
+- Detect which product topic the user is asking about
+- Rewrite the query to fix typos, expand abbreviations, and remove filler words (especially useful after AWS Transcribe speech-to-text)
+- Return a clarification message if no topic is matched, which is streamed directly to the user and saved to history for context in the next turn
+
+### Topic resolution
+
+Topics are defined in `constants.js` as a map of DB/S3 keys to display names:
+
+```js
+const CATEGORIES = {
+  aegis:    'AEGIS',
+  qualifly: 'QualiFly',
+}
+```
+
+At cold start, the Lambda queries `SELECT DISTINCT category FROM document_sections` and filters the results against this map. The classifier sees display names (`AEGIS`, `QualiFly`). The returned display name is reverse-mapped back to the DB key for retrieval filtering.
+
+To add a new topic: index documents under a new S3 folder, then add the corresponding entry to `CATEGORIES` and redeploy.
+
+---
+
+## Retrieval Strategy
 
 ### Retrievers
 
@@ -42,7 +68,7 @@ Searches `document_chunks.embedding` using HNSW approximate nearest-neighbour. C
 ```sql
 SELECT dc.section_id
 FROM document_chunks dc
-WHERE dc.metadata->>'category' = $2        -- optional category filter
+WHERE dc.metadata->>'category' = $2        -- topic filter
 ORDER BY dc.embedding <=> $1::vector
 LIMIT 20
 ```
@@ -55,19 +81,19 @@ Searches `document_chunks.content_tsvector` using PostgreSQL full-text search. C
 SELECT dc.section_id
 FROM document_chunks dc
 WHERE dc.content_tsvector @@ plainto_tsquery($1)
-  AND dc.metadata->>'category' = $2        -- optional category filter
+  AND dc.metadata->>'category' = $2        -- topic filter
 ORDER BY ts_rank(dc.content_tsvector, plainto_tsquery($1)) DESC
 LIMIT 20
 ```
 
 #### Header — semantic search on section headers
 
-Searches `document_sections.header_embedding` using HNSW. Captures queries that match a section topic even when chunk content doesn't rank highly. Only sections with a detected header are indexed (preamble sections with `section_header IS NULL` are skipped).
+Searches `document_sections.header_embedding` using HNSW. Captures queries that match a section topic even when chunk content doesn't rank highly. Only sections with a detected header are indexed.
 
 ```sql
 SELECT ds.id AS section_id
 FROM document_sections ds
-WHERE ds.category = $2                     -- optional category filter
+WHERE ds.category = $2                     -- topic filter
   AND ds.header_embedding IS NOT NULL
 ORDER BY ds.header_embedding <=> $1::vector
 LIMIT 10
@@ -75,7 +101,7 @@ LIMIT 10
 
 ### Reciprocal Rank Fusion (RRF)
 
-RRF combines ranked lists without requiring score normalisation across retrievers. Each retriever contributes a rank-based score per section:
+RRF combines ranked lists without requiring score normalisation across retrievers:
 
 ```
 score(section) = Σ  1 / (k + rank_i)
@@ -105,8 +131,6 @@ Sessions are server-issued and stored in DynamoDB. The Lambda is the single owne
 
 ### Invocation modes
 
-The Lambda handler branches on `event.action`:
-
 | `event.action` | Invocation type | Used by |
 |---|---|---|
 | `get_or_create_session` | Synchronous (`RequestResponse`) | Fargate `GET /session` |
@@ -125,9 +149,7 @@ Lambda: get_or_create_session(sessionId)
     └── ID not in DB     →  session expired      →  { status: "expired" }
 ```
 
-On `"expired"`, the frontend disables the input and shows an expiry message in the chat. The session ID remains in `sessionStorage` until the tab is closed or the user explicitly clears it.
-
-On every successful chat turn, `saveHistory` resets the TTL to `now + SESSION_TTL_SECONDS`, giving a **sliding 15-minute expiry window**. An idle session expires 15 minutes after the last message.
+On every successful chat turn, `saveHistory` resets the TTL to `now + SESSION_TTL_SECONDS`, giving a **sliding 15-minute expiry window**.
 
 ### DynamoDB schema
 
@@ -149,13 +171,16 @@ src/
 ├── handler.js          — Lambda entry point; branches on event.action for session vs chat
 └── lib/
     ├── config.js       — Environment variable bindings
-    ├── constants.js    — Shared constants (limits, TTL, model IDs, regex)
-    ├── llm.js          — Bedrock ConverseStream wrapper + system prompt loader
+    ├── constants.js    — Shared constants (limits, TTL, model IDs, regex, CATEGORIES map)
+    ├── llm.js          — Bedrock wrapper: classifyAndClean (non-streaming) + streamCompletion
     ├── logger.js       — Structured logger
-    ├── pipeline.js     — Full RAG pipeline: load history → retrieve → stream → save
+    ├── pipeline.js     — Full pipeline: classify → retrieve → stream → save history
     ├── retrieval.js    — Orchestrates embed → parallel retrievers → RRF → fetch sections
     ├── retrievers.js   — Three retriever functions + applyRRF
-    └── session.js      — DynamoDB session store: createSession, getOrCreateSession, saveHistory
+    ├── session.js      — DynamoDB session store: createSession, getOrCreateSession, saveHistory
+    └── prompts/
+        ├── prompt.txt             — System prompt for Claude (answer generation)
+        └── classifier-prompt.txt  — System prompt for topic classification and query rewriting
 ```
 
 ---
@@ -163,14 +188,17 @@ src/
 ## Deployment
 
 ```bash
+# Deploy classifier prompt to Bedrock Prompt Management (set PROMPT_TYPE="classifier" in script)
+./scripts/update-prompt.sh <environment>
+
+# Deploy system prompt to Bedrock Prompt Management (set PROMPT_TYPE="system" in script)
+./scripts/update-prompt.sh <environment>
+
+# Deploy Lambda
 ./scripts/deploy.sh <environment>
-# e.g. ./scripts/deploy.sh dev
 ```
 
-The deploy script:
-1. Fetches config from Secrets Manager (`chatbot/streaming/<env>`)
-2. Creates or updates the Bedrock Guardrail
-3. Packages and deploys the Lambda with a streaming Function URL
+The deploy script fetches all config from Secrets Manager (`chatbot/orchestration/<env>`) and sets them as Lambda environment variables.
 
 ---
 
@@ -180,9 +208,13 @@ The deploy script:
 |---|---|
 | `AWS_REGION` | AWS region |
 | `MODEL_ID` | Bedrock model ID for Claude |
-| `POSTGRES_HOST` | Aurora cluster endpoint |
+| `POSTGRES_HOST` | Aurora cluster or RDS Proxy endpoint |
 | `POSTGRES_DB` | Database name |
 | `DB_SECRET_ARN` | Secrets Manager ARN for DB credentials |
 | `GUARDRAIL_ID` | Bedrock Guardrail ID |
 | `GUARDRAIL_VERSION` | Bedrock Guardrail version |
+| `PROMPT_ARN` | Bedrock Prompt Management ARN for system prompt |
+| `PROMPT_VERSION` | Published version of the system prompt |
+| `CLASSIFIER_PROMPT_ARN` | Bedrock Prompt Management ARN for classifier prompt |
+| `CLASSIFIER_PROMPT_VERSION` | Published version of the classifier prompt |
 | `SESSIONS_TABLE` | DynamoDB table name for session storage |

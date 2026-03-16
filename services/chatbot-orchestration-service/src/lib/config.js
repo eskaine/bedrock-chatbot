@@ -26,9 +26,13 @@ const POSTGRES_DB   = _require('POSTGRES_DB')
 const GUARDRAIL_ID      = process.env.GUARDRAIL_ID
 const GUARDRAIL_VERSION = process.env.GUARDRAIL_VERSION
 
-// Optional — falls back to no system prompt if either is absent
-const PROMPT_ARN     = process.env.PROMPT_ARN
-const PROMPT_VERSION = process.env.PROMPT_VERSION
+// Required — Lambda init fails immediately if either is missing
+const PROMPT_ARN     = _require('PROMPT_ARN')
+const PROMPT_VERSION = _require('PROMPT_VERSION')
+
+// Required — classifier prompt for topic detection and query rewriting
+const CLASSIFIER_PROMPT_ARN     = _require('CLASSIFIER_PROMPT_ARN')
+const CLASSIFIER_PROMPT_VERSION = _require('CLASSIFIER_PROMPT_VERSION')
 
 // Optional — conversation history disabled if absent
 const SESSIONS_TABLE = process.env.SESSIONS_TABLE
@@ -41,6 +45,8 @@ module.exports = {
   DB_SECRET_ARN,
   PROMPT_ARN,
   PROMPT_VERSION,
+  CLASSIFIER_PROMPT_ARN,
+  CLASSIFIER_PROMPT_VERSION,
   SESSIONS_TABLE,
   POSTGRES_HOST,
   POSTGRES_DB,
