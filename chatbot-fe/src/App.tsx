@@ -8,7 +8,7 @@ function App() {
   return (
     <div className="h-screen flex items-center justify-center">
       <div className='flex flex-col gap-5 items-center'>
-        <div className="text-4xl font-bold">Ask Hock Ming</div>
+        <div className="text-4xl font-bold">Ask chatbot</div>
         <ChatDialog
           messages={messages}
           onSendMessage={sendMessage}
